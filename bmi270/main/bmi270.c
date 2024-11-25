@@ -705,6 +705,7 @@ esp_err_t leer_gyr(uint16_t* gyr_x, uint16_t* gyr_y, uint16_t* gyr_z) {
     if (ret != ESP_OK) return ret;
     *gyr_y = *gyr_y | ((uint16_t)tmp << 8);
     
+    // Post procesamiento
     ret = bmi_read(&addr_factor_zx, &tmp, 1);
     if (ret != ESP_OK) return ret;
 
@@ -740,12 +741,14 @@ void lectura() {
             ret = leer_acc(&acc_x, &acc_y, &acc_z);
             if (ret != ESP_OK) {
                 printf("Error lectura: %s \n", esp_err_to_name(ret));
+                continue;
             }
             
             // Leer datos del giroscopio
             ret = leer_gyr(&gyr_x, &gyr_y, &gyr_z);
             if (ret != ESP_OK) {
                 printf("Error lectura: %s \n", esp_err_to_name(ret));
+                continue;
             }
 
             printf("ACC x :%.4f y:%.4f z:%.4f ",
