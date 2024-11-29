@@ -2,23 +2,18 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "driver/gpio.h"
 #include "driver/uart.h"
 #include "driver/i2c_master.h"
+#include "esp_err.h"
 #include "esp_log.h"
-#include "esp_task.h"
 #include "freertos/idf_additions.h"
 #include "math.h"
-#include "sdkconfig.h"
 
 #include "esp_system.h"
 #include "nvs.h"
 #include "nvs_flash.h"
-#include "sdkconfig.h"
 
 #define BUF_SIZE (128)      // buffer size
-#define TXD_PIN 1           // UART TX pin
-#define RXD_PIN 3           // UART RX pin
 #define UART_NUM UART_NUM_0 // UART port number
 #define BAUD_RATE 115200    // Baud rate
 #define M_PI 3.14159265358979323846
@@ -26,17 +21,8 @@
 
 #define I2C_MASTER_SCL_IO GPIO_NUM_22  // GPIO pin
 #define I2C_MASTER_SDA_IO GPIO_NUM_21  // GPIO pin
-#define I2C_MASTER_FREQ_HZ 10000
 #define ESP_SLAVE_ADDR 0x68
-#define WRITE_BIT 0x0
-#define READ_BIT 0x1
-#define ACK_CHECK_EN 0x0
-#define EXAMPLE_I2C_ACK_CHECK_DIS 0x0
-#define ACK_VAL 0x0
-#define NACK_VAL 0x1
-#define Fodr 800
 #define NVS_NAMESPACE "storage"
-#define REDIRECT_LOGS 1
 
 #define CONCAT_BYTES(msb, lsb) (((uint16_t)msb << 8) | (uint16_t)lsb)
 
@@ -557,7 +543,7 @@ void softreset(void) {
     ret = bmi_write(&reg_softreset, &val_softreset, 1);
     vTaskDelay(1000 / portTICK_PERIOD_MS);
     if (ret != ESP_OK) {
-        printf("\nError en softreset: %s \n", esp_err_to_name(ret));
+        printf("\n%s: Error en softreset\n", esp_err_to_name(ret));
     } else {
         printf("\nSoftreset: OK\n\n");
     }
@@ -570,13 +556,13 @@ void powermode(void) {
     ret = bmi_read(&reg_pwr_conf, &tmp, 1);
     printf("Valor de PWR_CONF: %2X \n", tmp);
     if (ret != ESP_OK) {
-        printf("Error en PWR_CONF: %s \n", esp_err_to_name(ret));
+        printf("%s: Error en PWR_CONF\n", esp_err_to_name(ret));
     }
 
     ret2 = bmi_read(&reg_pwr_ctrl, &tmp2, 1);
     printf("Valor de PWR_CTRL: %2X \n", tmp2);
     if (ret2 != ESP_OK) {
-        printf("Error en PWR_CTRL: %s \n", esp_err_to_name(ret2));
+        printf("%s: Error en PWR_CTRL\n", esp_err_to_name(ret2));
     }
 }
 
@@ -598,7 +584,7 @@ void initialization(void) {
 
     ret = bmi_write(&reg_init_data, (uint8_t *)bmi270_config_file, config_size);
     if (ret != ESP_OK) {
-        printf("\nError cargando config_file\n");
+        printf("\n%s: Error cargando config_file\n", esp_err_to_name(ret));
     } else {
         printf("\nConfig_file cargado.\n");
     }
@@ -606,12 +592,12 @@ void initialization(void) {
     vTaskDelay(1000 / portTICK_PERIOD_MS);
 
     ret = bmi_write(&reg_init_ctrl, &val_init_ctrl2, 1);
-    // if(ret != ESP_OK){
-    //     printf("Error en write4: %s \n",esp_err_to_name(ret));
-    // }
-    // else {
-    //      printf("Init_ctrl = 1\n");
-    // }
+    if(ret != ESP_OK){
+        printf("%s: Error en write\n",esp_err_to_name(ret));
+    }
+    else {
+        printf("Init_ctrl = 1\n");
+    }
 
     printf("\nAlgoritmo de inicializacion finalizado.\n\n");
 
@@ -638,15 +624,14 @@ void bmipowermode(void) {
     // PWR_CTRL: disable auxiliary sensor, gryo and temp; acc on
     // 400Hz en datos acc, filter: performance optimized, 
     // acc_range +/-8g (1g = 9.80665 m/s2, alcance max: 78.4532 m/s2, 16 bit= 65536 => 1bit = 78.4532/32768 m/s2)
-    
     uint8_t reg_pwr_ctrl = 0x7D, val_pwr_ctrl = 0x06;
     uint8_t reg_pwr_conf = 0x7C, val_pwr_conf = 0x00;
 
-    uint8_t reg_acc_conf = 0x40, val_acc_conf = 0b10101011;
-    uint8_t reg_gyro_conf = 0x42, val_gyro_conf = 0b11101011;
+    uint8_t reg_acc_conf = 0x40, val_acc_conf = 0b10100110;
+    uint8_t reg_gyro_conf = 0x42, val_gyro_conf = 0b11100110;
 
     uint8_t reg_acc_range = 0x41, val_acc_range= 0x02; // ±8g | 4096 LSB/g
-    uint8_t reg_gyro_range = 0x43, val_gyro_range = 0x00; // : ±2000dps | 16384 LSB/dps
+    uint8_t reg_gyro_range = 0x43, val_gyro_range = 0x02; // : ±2000dps | 65.536 LSB/dps
  
     // Write configurations
     bmi_write(&reg_pwr_ctrl, &val_pwr_ctrl, 1);  // Enable acc + gyro
@@ -711,7 +696,7 @@ int serial_read(char* buffer, int size) {
 }
 
 void wait_for_plus(void) {
-    char handshake = '\0';
+    char handshake = 0;
     do {
         serial_read(&handshake, 1);
     } while (handshake != '+');
@@ -736,7 +721,6 @@ int seek_star(void) {
 }
 
 void handshake(void) {
-
     while (1) {
         wait_for_plus();
 
@@ -803,34 +787,34 @@ uint8_t addr_acc_z_lsb = 0x10;
 uint8_t addr_acc_z_msb = 0x11;
 
 esp_err_t leer_acc(uint16_t* acc_x, uint16_t* acc_y, uint16_t* acc_z) {
-    esp_err_t ret;
+    esp_err_t err;
     uint8_t lsb = 0;
     uint8_t msb = 0;
 
     // acc x
-    ret = bmi_read(&addr_acc_x_lsb, &lsb, 1);
-    if (ret != ESP_OK) return ret;
+    err = bmi_read(&addr_acc_x_lsb, &lsb, 1);
+    if (err != ESP_OK) return err;
 
-    ret = bmi_read(&addr_acc_x_msb, &msb, 1);
-    if (ret != ESP_OK) return ret;
+    err = bmi_read(&addr_acc_x_msb, &msb, 1);
+    if (err != ESP_OK) return err;
 
     *acc_x = CONCAT_BYTES(msb, lsb);
 
     // acc y
-    ret = bmi_read(&addr_acc_y_lsb, &lsb, 1);
-    if (ret != ESP_OK) return ret;
+    err = bmi_read(&addr_acc_y_lsb, &lsb, 1);
+    if (err != ESP_OK) return err;
 
-    ret = bmi_read(&addr_acc_y_msb, &msb, 1);
-    if (ret != ESP_OK) return ret;
+    err = bmi_read(&addr_acc_y_msb, &msb, 1);
+    if (err != ESP_OK) return err;
 
     *acc_y = CONCAT_BYTES(msb, lsb);
 
     // acc z
-    ret = bmi_read(&addr_acc_z_lsb, &lsb, 1);
-    if (ret != ESP_OK) return ret;
+    err = bmi_read(&addr_acc_z_lsb, &lsb, 1);
+    if (err != ESP_OK) return err;
 
-    ret = bmi_read(&addr_acc_z_msb, &msb, 1);
-    if (ret != ESP_OK) return ret;
+    err = bmi_read(&addr_acc_z_msb, &msb, 1);
+    if (err != ESP_OK) return err;
     
     *acc_z = CONCAT_BYTES(msb, lsb);
 
@@ -845,34 +829,34 @@ uint8_t addr_gyr_z_lsb=0x16;
 uint8_t addr_gyr_z_msb=0x17;
 
 esp_err_t leer_gyr(uint16_t* gyr_x, uint16_t* gyr_y, uint16_t* gyr_z) {
-    esp_err_t ret;
+    esp_err_t err;
     uint8_t lsb = 0;
     uint8_t msb = 0;
 
     // gyr x
-    ret = bmi_read(&addr_gyr_x_lsb, &lsb, 1);
-    if (ret != ESP_OK) return ret;
+    err = bmi_read(&addr_gyr_x_lsb, &lsb, 1);
+    if (err != ESP_OK) return err;
 
-    ret = bmi_read(&addr_gyr_x_msb, &msb, 1);
-    if (ret != ESP_OK) return ret;
+    err = bmi_read(&addr_gyr_x_msb, &msb, 1);
+    if (err != ESP_OK) return err;
 
     *gyr_x = CONCAT_BYTES(msb, lsb);
 
     // gyr y
-    ret = bmi_read(&addr_gyr_y_lsb, &lsb, 1);
-    if (ret != ESP_OK) return ret;
+    err = bmi_read(&addr_gyr_y_lsb, &lsb, 1);
+    if (err != ESP_OK) return err;
 
-    ret = bmi_read(&addr_gyr_y_msb, &msb, 1);
-    if (ret != ESP_OK) return ret;
+    err = bmi_read(&addr_gyr_y_msb, &msb, 1);
+    if (err != ESP_OK) return err;
 
     *gyr_y = CONCAT_BYTES(msb, lsb);
 
     // gyr z
-    ret = bmi_read(&addr_gyr_z_lsb, &lsb, 1);
-    if (ret != ESP_OK) return ret;
+    err = bmi_read(&addr_gyr_z_lsb, &lsb, 1);
+    if (err != ESP_OK) return err;
 
-    ret = bmi_read(&addr_gyr_z_msb, &msb, 1);
-    if (ret != ESP_OK) return ret;
+    err = bmi_read(&addr_gyr_z_msb, &msb, 1);
+    if (err != ESP_OK) return err;
     
     *gyr_z = CONCAT_BYTES(msb, lsb);
 
@@ -881,7 +865,7 @@ esp_err_t leer_gyr(uint16_t* gyr_x, uint16_t* gyr_y, uint16_t* gyr_z) {
 
 void lectura(const uint32_t sample_size) {
     float sum_acc_x = 0, sum_acc_y = 0, sum_acc_z = 0,
-    sum_gyr_x = 0, sum_gyr_y = 0, sum_gyr_z = 0;
+          sum_gyr_x = 0, sum_gyr_y = 0, sum_gyr_z = 0;
 
     float* vals_acc_x = malloc(sizeof(float) * sample_size);
     float* vals_acc_y = malloc(sizeof(float) * sample_size);
@@ -906,24 +890,7 @@ void lectura(const uint32_t sample_size) {
     }
 
     for (uint32_t i = 0; i < sample_size; i++) {
-        // Esperar a las mediciones
         while (!acc_gyr_ready()) {}
-
-        // Leer datos del acelerometro
-        // uint8_t data[12];
-        // esp_err_t ret = bmi_read(addr_acc_x_lsb, data, 12);
-        // if (ret != ESP_OK) {
-        //     printf("ERROR DE LECTURA: %s \n", esp_err_to_name(ret));
-        //     continue;
-        // }
-        
-        // uint16_t acc_x = CONCAT_BYTES(data[1], data[0]);
-        // uint16_t acc_y = CONCAT_BYTES(data[3], data[2]);
-        // uint16_t acc_z = CONCAT_BYTES(data[5], data[4]);
-
-        // uint16_t gyr_x = CONCAT_BYTES(data[7], data[6]);
-        // uint16_t gyr_y = CONCAT_BYTES(data[9], data[8]);
-        // uint16_t gyr_z = CONCAT_BYTES(data[11], data[10]);
 
         uint16_t acc_x;
         uint16_t acc_y;
@@ -933,20 +900,29 @@ void lectura(const uint32_t sample_size) {
         uint16_t gyr_y;
         uint16_t gyr_z;
 
-        leer_acc(&acc_x, &acc_y, &acc_z);
-        leer_gyr(&gyr_x, &gyr_y, &gyr_z);
-
+        esp_err_t err = leer_acc(&acc_x, &acc_y, &acc_z);
+        if (err != ESP_OK) {
+            vTaskDelay(5000 / portTICK_PERIOD_MS);
+            printf("%s: Error de lectura de datos", esp_err_to_name(err));
+            goto end;
+        }
+        err = leer_gyr(&gyr_x, &gyr_y, &gyr_z);
+        if (err != ESP_OK) {
+            vTaskDelay(5000 / portTICK_PERIOD_MS);
+            printf("%s: Error de lectura de datos", esp_err_to_name(err));
+            goto end;
+        }
     
-        float acc_x_g = (int16_t)acc_x / (4096.0);
-        float acc_y_g = (int16_t)acc_y / (4096.0);
-        float acc_z_g = (int16_t)acc_z / (4096.0);
+        float acc_x_g = (int16_t)acc_x * (1.0 / 4096.0);
+        float acc_y_g = (int16_t)acc_y * (1.0 / 4096.0);
+        float acc_z_g = (int16_t)acc_z * (1.0 / 4096.0);
         vals_acc_x[i] = acc_x_g;
         vals_acc_y[i] = acc_y_g;
         vals_acc_z[i] = acc_z_g;
 
-        float gyr_x_dps = (int16_t)gyr_x / (16384.0);
-        float gyr_y_dps = (int16_t)gyr_y / (16384.0);
-        float gyr_z_dps = (int16_t)gyr_z / (16384.0);
+        float gyr_x_dps = (int16_t)gyr_x * (1.0 / 65.536);
+        float gyr_y_dps = (int16_t)gyr_y * (1.0 / 65.536);
+        float gyr_z_dps = (int16_t)gyr_z * (1.0 / 65.536);
         vals_gyr_x[i] = gyr_x_dps;
         vals_gyr_y[i] = gyr_y_dps;
         vals_gyr_z[i] = gyr_z_dps;
@@ -968,9 +944,6 @@ void lectura(const uint32_t sample_size) {
         sum_gyr_x += gyr_x_dps * gyr_x_dps;
         sum_gyr_y += gyr_y_dps * gyr_y_dps;
         sum_gyr_z += gyr_z_dps * gyr_z_dps;
-
-
-        vTaskDelay(pdMS_TO_TICKS(200));
     }
 
     // Envio de RMS de las 4 variables de medicion
@@ -1028,15 +1001,17 @@ void lectura(const uint32_t sample_size) {
     uart_write_bytes(UART_NUM, (const char*)resultado_fft_real, sizeof(float) * sample_size);
     uart_write_bytes(UART_NUM, (const char*)resultado_fft_imag, sizeof(float) * sample_size);
 
+    free(resultado_fft_real);
+    free(resultado_fft_imag);
+
+end:
+
     free(vals_acc_x);
     free(vals_acc_y);
     free(vals_acc_z);
     free(vals_gyr_x);
     free(vals_gyr_y);
     free(vals_gyr_z);
-
-    free(resultado_fft_real);
-    free(resultado_fft_imag);
 }
 
 
@@ -1131,9 +1106,9 @@ void app_main(void) {
     internal_status();
     
     uart_setup();
-    handshake();
-
     init_nvs();
+
+    handshake();
     
     uint32_t sample_size = load_window_size(50);
 
@@ -1144,7 +1119,6 @@ void app_main(void) {
             continue;
 
         if (command == GET_DATA) {
-            //printf("Comienza lectura\n\n");
             lectura(sample_size);
 
         } else if (command == CHANGE_SAMPLE_SIZE) {
@@ -1161,7 +1135,7 @@ void app_main(void) {
             esp_restart();
 
         } else {
-            printf("FAIL");
+            uart_write_bytes(UART_NUM, "GOOD", 4);
         }
     }
 }

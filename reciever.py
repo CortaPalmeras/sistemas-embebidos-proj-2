@@ -12,26 +12,36 @@ PORT = '/dev/ttyUSB0'  # Esto depende del sistema operativo
 BAUD_RATE = 115200  # Debe coincidir con la configuración de la ESP32
 
 # Se abre la conexión serial
-ser = serial.Serial(PORT, BAUD_RATE, timeout=1.5)
+ser = serial.Serial(PORT, BAUD_RATE, timeout=5)
 
-# reinicia el programa en caso de que estaba en curso
-_ = ser.write('q'.encode())
+while (True):
+    # reinicia el programa en caso de que estaba en curso
+    _ = ser.write('q'.encode())
+
+    # imprimir a la terminal logs de inicio
+    print("\n-- output inicial --")
+    print(ser.readall().decode())
+
+    ser.timeout = 1
+
+    # handshake para sincronizar el computador con el ESP
+    print("\n-- handshake --")
+    _ = ser.write('++++++++++*'.encode())
+    resultado = ser.read(4).decode()
+    print(resultado)
+
+    if resultado == 'GOOD':
+        break
+    else:
+        print("error al realizar handshake, intentando de nuevo")
+        ser.timeout = 5
+
+# por si algo se imprime despues del handshake
+print("\n-- output post handshake --")
 print(ser.readall().decode())
 
-# handshake para sincronizar el computador con el ESP
-print("\n-- handshake --")
-_ = ser.write('++++++++++*'.encode())
-resultado = ser.read(4).decode()
-print(resultado)
-if resultado != 'GOOD':
-    exit(1)
 
-# imprimir a la terminal logs de inicio
-print("\n-- output inicial --")
-print(ser.readall().decode())
-
-
-# se lee el tamanho de la ventana de datos
+# se lee el tamaño de la ventana de datos
 def solicitar_tamano_ventana():
     print("\n-- leer tamaño del sample --")
     _ = ser.write('s'.encode())
@@ -39,7 +49,7 @@ def solicitar_tamano_ventana():
 
     if len(raw_sample_size) == 4:
         new_sample_size = unpack('I', raw_sample_size)[0]
-        print(f"el tamaño previo de la muestra es {new_sample_size}")
+        print(f"el tamaño de la muestra es {new_sample_size}")
         return new_sample_size
     else:
         print(f"se leyeron {len(raw_sample_size)} bytes")
@@ -123,6 +133,12 @@ def solicitar_ventana_datos(progress_dialog):
     # Actualizar la barra de progreso
     for i in range(samples):
         data = ser.read(24)
+        if len(data) != 24:
+            print("\nOcurrió un error en la lectura de datos")
+            print(ser.readall().decode())
+            progress_dialog.close()
+            return
+
         acc_x, acc_y, acc_z, gyr_x,gyr_y,gyr_z = unpack("ffffff", data)
         lista_acc_x.append(acc_x)
         lista_acc_y.append(acc_y)
@@ -137,8 +153,9 @@ def solicitar_ventana_datos(progress_dialog):
 
         progress_dialog.setValue(i+1)
         if progress_dialog.wasCanceled():
-            print("esperando a que termine la muestra")
+            print("esperando a que termine la muestra...", end='')
             _ = ser.readall()
+            print(" listo")
             return
 
     data = ser.read(24)
