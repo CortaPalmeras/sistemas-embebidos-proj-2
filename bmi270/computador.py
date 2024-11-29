@@ -7,13 +7,12 @@ import matplotlib.pyplot as plt
 import array
 import time
 
-
 # Se configura el puerto y el BAUD_Rate
 PORT = '/dev/ttyUSB0'  # Esto depende del sistema operativo
 BAUD_RATE = 115200  # Debe coincidir con la configuración de la ESP32
 
 # Se abre la conexión serial
-ser = serial.Serial(PORT, BAUD_RATE, timeout=1)
+ser = serial.Serial(PORT, BAUD_RATE, timeout=1.5)
 
 # reinicia el programa en caso de que estaba en curso
 _ = ser.write('q'.encode())
@@ -57,39 +56,49 @@ def generar_graficos(tiempo,
                      lista_gyr_y, esp_rms_gyr_y,
                      lista_gyr_z, esp_rms_gyr_z):
     
-    fig, axes = plt.subplots(3, 3, figsize=(10, 5))
-    (ax1, ax2), (ax3, ax4), (ax5, ax6) = axes
+    # Crear una figura con una cuadrícula de subgráficos de 3 filas x 2 columnas
+    fig, axes = plt.subplots(3, 2, figsize=(12, 10))
+    axes = axes.flatten()  # Aplanar para acceso fácil a cada subgráfico
 
-    ax1.plot(tiempo, lista_acc_x, marker='o', linestyle='-', color='b',  label=f'Aceleración (h) RMS={esp_rms_acc_x}')
-    ax1.set_title('Varaición de la aceleración en el eje x en el tiempo')
-    ax1.set_xlabel('Tiempo (segundos)')
-    ax1.set_ylabel('Aceleración (g)')
+    # Gráficos de aceleración
+    axes[0].plot(tiempo, lista_acc_x, marker='o', linestyle='-', color='b', label=f'RMS={esp_rms_acc_x:.2f} g')
+    axes[0].set_title('Variación de la aceleración en el eje X')
+    axes[0].set_xlabel('Tiempo (segundos)')
+    axes[0].set_ylabel('Aceleración (g)')
+    axes[0].legend()
 
-    ax2.plot(tiempo, lista_acc_y, marker='o', linestyle='-', color='b',  label=f'Aceleración (g) RMS={esp_rms_acc_y}')
-    ax2.set_title('Varaición de la aceleración en el eje y en el tiempo')
-    ax2.set_xlabel('Tiempo (segundos)')
-    ax2.set_ylabel('Aceleración (g)')
+    axes[1].plot(tiempo, lista_acc_y, marker='o', linestyle='-', color='b', label=f'RMS={esp_rms_acc_y:.2f} g')
+    axes[1].set_title('Variación de la aceleración en el eje Y')
+    axes[1].set_xlabel('Tiempo (segundos)')
+    axes[1].set_ylabel('Aceleración (g)')
+    axes[1].legend()
 
-    ax3.plot(tiempo, lista_acc_z, marker='o', linestyle='-', color='b',  label=f'Aceleración (g) RMS={esp_rms_acc_z}')
-    ax3.set_title('Varaición de la aceleración en el eje z en el tiempo')
-    ax3.set_xlabel('Tiempo (segundos)')
-    ax3.set_ylabel('Aceleración (g)')
+    axes[2].plot(tiempo, lista_acc_z, marker='o', linestyle='-', color='b', label=f'RMS={esp_rms_acc_z:.2f} g')
+    axes[2].set_title('Variación de la aceleración en el eje Z')
+    axes[2].set_xlabel('Tiempo (segundos)')
+    axes[2].set_ylabel('Aceleración (g)')
+    axes[2].legend()
 
-    ax4.plot(tiempo, lista_gyr_x, marker='o', linestyle='-', color='b',  label=f'Eps RMS={esp_rms_gyr_x}')
-    ax4.set_title('Variación espacial del eje x en el Tiempo')
-    ax4.set_xlabel('Tiempo (segundos)')
-    ax4.set_ylabel('Eps (grados/segundos)')
+    # Gráficos de giroscopio
+    axes[3].plot(tiempo, lista_gyr_x, marker='o', linestyle='-', color='r', label=f'RMS={esp_rms_gyr_x:.2f} °/s')
+    axes[3].set_title('Variación del giro en el eje X')
+    axes[3].set_xlabel('Tiempo (segundos)')
+    axes[3].set_ylabel('Velocidad angular (°/s)')
+    axes[3].legend()
 
-    ax5.plot(tiempo, lista_gyr_y, marker='o', linestyle='-', color='b',  label=f'Eps RMS={esp_rms_gyr_y}%')
-    ax5.set_title('Variación espacial del eje y en el Tiempo')
-    ax5.set_xlabel('Tiempo (segundos)')
-    ax5.set_ylabel('Eps (grados/segundos)')
-    
-    ax6.plot(tiempo, lista_gyr_z, marker='o', linestyle='-', color='b',  label=f'Eps RMS={esp_rms_gyr_z}')
-    ax6.set_title('Variación espacial del eje z en el Tiempo')
-    ax6.set_xlabel('Tiempo (segundos)')
-    ax6.set_ylabel('Eps (grados/segundos)')
+    axes[4].plot(tiempo, lista_gyr_y, marker='o', linestyle='-', color='r', label=f'RMS={esp_rms_gyr_y:.2f} °/s')
+    axes[4].set_title('Variación del giro en el eje Y')
+    axes[4].set_xlabel('Tiempo (segundos)')
+    axes[4].set_ylabel('Velocidad angular (°/s)')
+    axes[4].legend()
 
+    axes[5].plot(tiempo, lista_gyr_z, marker='o', linestyle='-', color='r', label=f'RMS={esp_rms_gyr_z:.2f} °/s')
+    axes[5].set_title('Variación del giro en el eje Z')
+    axes[5].set_xlabel('Tiempo (segundos)')
+    axes[5].set_ylabel('Velocidad angular (°/s)')
+    axes[5].legend()
+
+    # Ajustar espaciado entre subgráficos
     plt.tight_layout()
     plt.show()
 
@@ -113,7 +122,7 @@ def solicitar_ventana_datos(progress_dialog):
 
     # Actualizar la barra de progreso
     for i in range(samples):
-        data = ser.read(16)
+        data = ser.read(24)
         acc_x, acc_y, acc_z, gyr_x,gyr_y,gyr_z = unpack("ffffff", data)
         lista_acc_x.append(acc_x)
         lista_acc_y.append(acc_y)
@@ -122,8 +131,8 @@ def solicitar_ventana_datos(progress_dialog):
         lista_gyr_y.append(gyr_y)
         lista_gyr_z.append(gyr_z)
         print(f"acc_x: {acc_x:.5f}\tacc_y: {acc_y:.5f}" +
-              f"\tacc_z:{acc_z:.5f}%\tgyr_x:{gyr_x:.5f}" +
-              f"\tgyr_y:{gyr_y:.5f}%\tgyr_z:{gyr_z:.5f}")
+              f"\tacc_z:{acc_z:.5f}\tgyr_x:{gyr_x:.5f}" +
+              f"\tgyr_y:{gyr_y:.5f}\tgyr_z:{gyr_z:.5f}")
         
 
         progress_dialog.setValue(i+1)
@@ -164,7 +173,7 @@ def solicitar_ventana_datos(progress_dialog):
     print(f"gyr_x: {peaks_gyr_x}")
     print(f"gyr_y: {peaks_gyr_y}")
     print(f"gyr_z: {peaks_gyr_z}")
-
+    
     data_fft_real_acc_x = ser.read(4 * samples)
     data_fft_imag_acc_x = ser.read(4 * samples)
     fft_real_acc_x = array.array('f', data_fft_real_acc_x).tolist()
@@ -236,8 +245,6 @@ def cambiar_tamanho_ventana(tamanho: int) -> bool:
 
     samples = solicitar_tamano_ventana()
     return samples == tamanho
-
-
 
 
 

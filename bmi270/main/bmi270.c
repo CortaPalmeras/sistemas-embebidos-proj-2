@@ -1,12 +1,28 @@
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "driver/uart.h"
 #include "driver/i2c_master.h"
 #include "esp_log.h"
 #include "esp_task.h"
+#include "freertos/idf_additions.h"
 #include "math.h"
 #include "sdkconfig.h"
+
+#include "esp_system.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+#include "sdkconfig.h"
+
+#define BUF_SIZE (128)      // buffer size
+#define TXD_PIN 1           // UART TX pin
+#define RXD_PIN 3           // UART RX pin
+#define UART_NUM UART_NUM_0 // UART port number
+#define BAUD_RATE 115200    // Baud rate
+#define M_PI 3.14159265358979323846
+#define REDIRECT_LOGS 1
 
 #define I2C_MASTER_SCL_IO GPIO_NUM_22  // GPIO pin
 #define I2C_MASTER_SDA_IO GPIO_NUM_21  // GPIO pin
@@ -21,6 +37,8 @@
 #define Fodr 800
 #define NVS_NAMESPACE "storage"
 #define REDIRECT_LOGS 1
+
+#define CONCAT_BYTES(msb, lsb) (((uint16_t)msb << 8) | (uint16_t)lsb)
 
 esp_err_t ret = ESP_OK;
 esp_err_t ret2 = ESP_OK;
@@ -616,6 +634,33 @@ void check_initialization(void) {
     }
 }
 
+void bmipowermode(void) {
+    // PWR_CTRL: disable auxiliary sensor, gryo and temp; acc on
+    // 400Hz en datos acc, filter: performance optimized, 
+    // acc_range +/-8g (1g = 9.80665 m/s2, alcance max: 78.4532 m/s2, 16 bit= 65536 => 1bit = 78.4532/32768 m/s2)
+    
+    uint8_t reg_pwr_ctrl = 0x7D, val_pwr_ctrl = 0x06;
+    uint8_t reg_pwr_conf = 0x7C, val_pwr_conf = 0x00;
+
+    uint8_t reg_acc_conf = 0x40, val_acc_conf = 0b10101011;
+    uint8_t reg_gyro_conf = 0x42, val_gyro_conf = 0b11101011;
+
+    uint8_t reg_acc_range = 0x41, val_acc_range= 0x02; // ±8g | 4096 LSB/g
+    uint8_t reg_gyro_range = 0x43, val_gyro_range = 0x00; // : ±2000dps | 16384 LSB/dps
+ 
+    // Write configurations
+    bmi_write(&reg_pwr_ctrl, &val_pwr_ctrl, 1);  // Enable acc + gyro
+    bmi_write(&reg_pwr_conf, &val_pwr_conf, 1);  // Set normal power mode
+    
+    bmi_write(&reg_acc_conf, &val_acc_conf, 1);  // Set accelerometer ODR
+    bmi_write(&reg_gyro_conf, &val_gyro_conf, 1); // Set gyroscope ODR
+
+    bmi_write(&reg_acc_range, &val_acc_range, 1); // Set gyroscope range
+    bmi_write(&reg_gyro_range, &val_gyro_range, 1); // Set gyroscope range
+
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+}
+
 void internal_status(void) {
     uint8_t reg_internalstatus = 0x21;
     uint8_t tmp;
@@ -626,43 +671,168 @@ void internal_status(void) {
 }
 
 
-uint8_t addr_acc_z_lsb = 0x10;
-uint8_t addr_acc_z_msb = 0x11;
+/*
+ * Esto se copio y pego del archivo main del proyecto comunicacion serial.
+ * Permite configurar la conexion entre el computador y controlador para poder enviar
+ */
+static int uart1_printf(const char* str, va_list ap) {
+    char* buf;
+    vasprintf(&buf, str, ap);
+    uart_write_bytes(UART_NUM_1, buf, strlen(buf));
+    free(buf);
+    return 0;
+}
+
+// Setup of UART connections 0 and 1, and try to redirect logs to UART1 if asked
+static void uart_setup() {
+    uart_config_t uart_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+    };
+
+    uart_param_config(UART_NUM_0, &uart_config);
+    uart_param_config(UART_NUM_1, &uart_config);
+    uart_driver_install(UART_NUM_0, BUF_SIZE * 2, 0, 0, NULL, 0);
+    uart_driver_install(UART_NUM_1, BUF_SIZE * 2, 0, 0, NULL, 0);
+
+    // Redirect ESP log to UART1
+    if (REDIRECT_LOGS) {
+        esp_log_set_vprintf(uart1_printf);
+    }
+}
+
+// Read UART_num for input with timeout of 1 sec
+int serial_read(char* buffer, int size) {
+    int len = uart_read_bytes(UART_NUM, buffer, size, pdMS_TO_TICKS(1000));
+    return len;
+}
+
+void wait_for_plus(void) {
+    char handshake = '\0';
+    do {
+        serial_read(&handshake, 1);
+    } while (handshake != '+');
+}
+
+int seek_star(void) {
+    char handshake = '\0';
+
+    while (1) {
+        int rLen = serial_read(&handshake, 1);
+
+        if (rLen == 1) {
+            if (handshake == '+') {
+                continue;
+            } else if (handshake == '*') {
+                return 1;
+            } else {
+                return 0;
+            }
+        }
+    }
+}
+
+void handshake(void) {
+
+    while (1) {
+        wait_for_plus();
+
+        if (seek_star()) {
+            break;
+        } else {
+            uart_write_bytes(UART_NUM, "FAIL", 4);
+        }
+    }
+
+    uart_write_bytes(UART_NUM, "GOOD", 4);
+}
+
+// Funciones auxiliares
+void calcularFFT(float* array, int size, float* array_re, float* array_im) {
+    for (int k = 0; k < size; k++) {
+        float real = 0;
+        float imag = 0;
+
+        for (int n = 0; n < size; n++) {
+            float angulo = 2 * M_PI * k * n / size;
+            float cos_angulo = cos(angulo);
+            float sin_angulo = -sin(angulo);
+
+            real += cos_angulo * array[n];
+            imag += sin_angulo * array[n];
+        }
+        real /= size;
+        imag /= size;
+        array_re[k] = real;
+        array_im[k] = imag;
+    }
+}
+
+void obtener5Peaks(float* datos, float* resultados, uint32_t sample_size) {
+    for (int i = 0; i < sample_size; i++) {
+        for (int j = 0; j < 5; j++) {
+            if (datos[i] > resultados[j]) {
+                for (int k = 4; k > j; k--) {
+                    resultados[k] = resultados[k - 1];
+                }
+                resultados[j] = datos[i];
+                break;
+            }
+        }
+    }
+}
+
+uint8_t status_addr = 0x03;
+uint8_t drdy_acc = 0b10000000;
+uint8_t drdy_gyr = 0b01000000;
+
+uint8_t acc_gyr_ready() {
+    uint8_t status;
+    bmi_read(&status_addr, &status, 1);
+    return ((status & drdy_acc) == drdy_acc) && ((status & drdy_gyr) == drdy_gyr);
+}
+
 uint8_t addr_acc_x_lsb = 0x0C;
 uint8_t addr_acc_x_msb = 0x0D;
 uint8_t addr_acc_y_lsb = 0x0E;
 uint8_t addr_acc_y_msb = 0x0F;
+uint8_t addr_acc_z_lsb = 0x10;
+uint8_t addr_acc_z_msb = 0x11;
 
 esp_err_t leer_acc(uint16_t* acc_x, uint16_t* acc_y, uint16_t* acc_z) {
     esp_err_t ret;
-    uint8_t tmp = 0;
+    uint8_t lsb = 0;
+    uint8_t msb = 0;
 
     // acc x
-    ret = bmi_read(&addr_acc_x_msb, &tmp, 1);
+    ret = bmi_read(&addr_acc_x_lsb, &lsb, 1);
     if (ret != ESP_OK) return ret;
-    *acc_x = tmp;
 
-    ret = bmi_read(&addr_acc_x_lsb, &tmp, 1);
+    ret = bmi_read(&addr_acc_x_msb, &msb, 1);
     if (ret != ESP_OK) return ret;
-    *acc_x = (*acc_x << 8) | tmp;
-    
+
+    *acc_x = CONCAT_BYTES(msb, lsb);
+
     // acc y
-    ret = bmi_read(&addr_acc_y_msb, &tmp, 1);
+    ret = bmi_read(&addr_acc_y_lsb, &lsb, 1);
     if (ret != ESP_OK) return ret;
-    *acc_y = tmp;
 
-    ret = bmi_read(&addr_acc_y_lsb, &tmp, 1);
+    ret = bmi_read(&addr_acc_y_msb, &msb, 1);
     if (ret != ESP_OK) return ret;
-    *acc_y = (*acc_y << 8) | tmp;
+
+    *acc_y = CONCAT_BYTES(msb, lsb);
 
     // acc z
-    ret = bmi_read(&addr_acc_z_msb, &tmp, 1);
+    ret = bmi_read(&addr_acc_z_lsb, &lsb, 1);
     if (ret != ESP_OK) return ret;
-    *acc_z = tmp;
 
-    ret = bmi_read(&addr_acc_z_lsb, &tmp, 1);
+    ret = bmi_read(&addr_acc_z_msb, &msb, 1);
     if (ret != ESP_OK) return ret;
-    *acc_z = (*acc_z << 8) | tmp;
+    
+    *acc_z = CONCAT_BYTES(msb, lsb);
 
     return ESP_OK;
 }
@@ -673,125 +843,278 @@ uint8_t addr_gyr_y_lsb=0x14;
 uint8_t addr_gyr_y_msb=0x15;
 uint8_t addr_gyr_z_lsb=0x16;
 uint8_t addr_gyr_z_msb=0x17;
-uint8_t addr_factor_zx = 0x3C;
 
 esp_err_t leer_gyr(uint16_t* gyr_x, uint16_t* gyr_y, uint16_t* gyr_z) {
     esp_err_t ret;
-    uint8_t tmp = 0;
+    uint8_t lsb = 0;
+    uint8_t msb = 0;
+
     // gyr x
-    ret = bmi_read(&addr_gyr_x_lsb, &tmp, 1);
+    ret = bmi_read(&addr_gyr_x_lsb, &lsb, 1);
     if (ret != ESP_OK) return ret;
-    *gyr_x = tmp;
 
-    ret = bmi_read(&addr_gyr_x_msb, &tmp, 1);
+    ret = bmi_read(&addr_gyr_x_msb, &msb, 1);
     if (ret != ESP_OK) return ret;
-    *gyr_x = *gyr_x | ((uint16_t) tmp << 8);
 
-    // gyr z
-    ret = bmi_read(&addr_gyr_z_lsb, &tmp, 1);
-    if (ret != ESP_OK) return ret;
-    *gyr_z = tmp;
-
-    ret = bmi_read(&addr_gyr_z_msb, &tmp, 1);
-    if (ret != ESP_OK) return ret;
-    *gyr_z = *gyr_z | ((uint16_t)tmp << 8);
+    *gyr_x = CONCAT_BYTES(msb, lsb);
 
     // gyr y
-    ret = bmi_read(&addr_gyr_y_lsb, &tmp, 1);
-    if (ret != ESP_OK) return ret;
-    *gyr_y = tmp;
-
-    ret = bmi_read(&addr_gyr_y_msb, &tmp, 1);
-    if (ret != ESP_OK) return ret;
-    *gyr_y = *gyr_y | ((uint16_t)tmp << 8);
-    
-    // Post procesamiento
-    ret = bmi_read(&addr_factor_zx, &tmp, 1);
+    ret = bmi_read(&addr_gyr_y_lsb, &lsb, 1);
     if (ret != ESP_OK) return ret;
 
-    int8_t factor_xz;
-    if (tmp & 0b01000000) {
-        factor_xz = (int8_t)(tmp | 0b1000000);
-    } else {
-        factor_xz = (int8_t)tmp;
-    }
+    ret = bmi_read(&addr_gyr_y_msb, &msb, 1);
+    if (ret != ESP_OK) return ret;
+
+    *gyr_y = CONCAT_BYTES(msb, lsb);
+
+    // gyr z
+    ret = bmi_read(&addr_gyr_z_lsb, &lsb, 1);
+    if (ret != ESP_OK) return ret;
+
+    ret = bmi_read(&addr_gyr_z_msb, &msb, 1);
+    if (ret != ESP_OK) return ret;
     
-    *gyr_x -= factor_xz * (*gyr_z) / 512;
+    *gyr_z = CONCAT_BYTES(msb, lsb);
 
     return ESP_OK;
 }
 
-void lectura() {
-    uint8_t reg_intstatus = 0x03;
-    uint16_t acc_x;
-    uint16_t acc_y;
-    uint16_t acc_z;
+void lectura(const uint32_t sample_size) {
+    float sum_acc_x = 0, sum_acc_y = 0, sum_acc_z = 0,
+    sum_gyr_x = 0, sum_gyr_y = 0, sum_gyr_z = 0;
 
-    uint16_t gyr_x;
-    uint16_t gyr_y;
-    uint16_t gyr_z;
+    float* vals_acc_x = malloc(sizeof(float) * sample_size);
+    float* vals_acc_y = malloc(sizeof(float) * sample_size);
+    float* vals_acc_z = malloc(sizeof(float) * sample_size);
 
-    esp_err_t ret;
-    uint8_t tmp;
+    float* vals_gyr_x = malloc(sizeof(float) * sample_size);
+    float* vals_gyr_y = malloc(sizeof(float) * sample_size);
+    float* vals_gyr_z = malloc(sizeof(float) * sample_size);
 
-    while (1) {
-        bmi_read(&reg_intstatus, &tmp, 1);
-        if ((tmp & 0b10000000) == 0x80) {
-            // Leer datos del acelerometro
-            ret = leer_acc(&acc_x, &acc_y, &acc_z);
-            if (ret != ESP_OK) {
-                printf("Error lectura: %s \n", esp_err_to_name(ret));
-                continue;
-            }
-            
-            // Leer datos del giroscopio
-            ret = leer_gyr(&gyr_x, &gyr_y, &gyr_z);
-            if (ret != ESP_OK) {
-                printf("Error lectura: %s \n", esp_err_to_name(ret));
-                continue;
-            }
+    float peaks_acc_x[5];
+    float peaks_acc_y[5];
+    float peaks_acc_z[5];
 
-            printf("ACC x :%.4f y:%.4f z:%.4f ",
-                (int16_t)acc_x * (8.000 / 32768),
-                (int16_t)acc_y * (8.000 / 32768),
-                (int16_t)acc_z * (8.000 / 32768));
+    float peaks_gyr_x[5];
+    float peaks_gyr_y[5];
+    float peaks_gyr_z[5];
 
-            printf("GYR: x:%f y:%f z:%f\n",
-                (int16_t)gyr_x * (2000.000 / 32768),
-                (int16_t)gyr_y * (2000.000 / 32768),
-                (int16_t)gyr_z * (2000.000 / 32768));
+    for (uint32_t i = 0; i < 10; i++) {
+        uint16_t tmp;
+        leer_acc(&tmp, &tmp, &tmp);
+        leer_gyr(&tmp, &tmp, &tmp);
+    }
+
+    for (uint32_t i = 0; i < sample_size; i++) {
+        // Esperar a las mediciones
+        while (!acc_gyr_ready()) {}
+
+        // Leer datos del acelerometro
+        // uint8_t data[12];
+        // esp_err_t ret = bmi_read(addr_acc_x_lsb, data, 12);
+        // if (ret != ESP_OK) {
+        //     printf("ERROR DE LECTURA: %s \n", esp_err_to_name(ret));
+        //     continue;
+        // }
+        
+        // uint16_t acc_x = CONCAT_BYTES(data[1], data[0]);
+        // uint16_t acc_y = CONCAT_BYTES(data[3], data[2]);
+        // uint16_t acc_z = CONCAT_BYTES(data[5], data[4]);
+
+        // uint16_t gyr_x = CONCAT_BYTES(data[7], data[6]);
+        // uint16_t gyr_y = CONCAT_BYTES(data[9], data[8]);
+        // uint16_t gyr_z = CONCAT_BYTES(data[11], data[10]);
+
+        uint16_t acc_x;
+        uint16_t acc_y;
+        uint16_t acc_z;
+
+        uint16_t gyr_x;
+        uint16_t gyr_y;
+        uint16_t gyr_z;
+
+        leer_acc(&acc_x, &acc_y, &acc_z);
+        leer_gyr(&gyr_x, &gyr_y, &gyr_z);
+
+    
+        float acc_x_g = (int16_t)acc_x / (4096.0);
+        float acc_y_g = (int16_t)acc_y / (4096.0);
+        float acc_z_g = (int16_t)acc_z / (4096.0);
+        vals_acc_x[i] = acc_x_g;
+        vals_acc_y[i] = acc_y_g;
+        vals_acc_z[i] = acc_z_g;
+
+        float gyr_x_dps = (int16_t)gyr_x / (16384.0);
+        float gyr_y_dps = (int16_t)gyr_y / (16384.0);
+        float gyr_z_dps = (int16_t)gyr_z / (16384.0);
+        vals_gyr_x[i] = gyr_x_dps;
+        vals_gyr_y[i] = gyr_y_dps;
+        vals_gyr_z[i] = gyr_z_dps;
+
+        float f_data[6];
+        f_data[0] = acc_x_g;
+        f_data[1] = acc_y_g;
+        f_data[2] = acc_z_g;
+        f_data[3] = gyr_x_dps;
+        f_data[4] = gyr_y_dps;
+        f_data[5] = gyr_z_dps;
+
+        uart_write_bytes(UART_NUM, (const char*)f_data, sizeof(float) * 6);
+    
+        sum_acc_x += acc_x_g * acc_x_g;
+        sum_acc_y += acc_y_g * acc_y_g;
+        sum_acc_z += acc_z_g * acc_z_g;
+
+        sum_gyr_x += gyr_x_dps * gyr_x_dps;
+        sum_gyr_y += gyr_y_dps * gyr_y_dps;
+        sum_gyr_z += gyr_z_dps * gyr_z_dps;
+
+
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
+    // Envio de RMS de las 4 variables de medicion
+    float rms_data[6];
+    rms_data[0] = sqrt(sum_acc_x / sample_size);
+    rms_data[1] = sqrt(sum_acc_y / sample_size);
+    rms_data[2] = sqrt(sum_acc_z / sample_size);
+    rms_data[3] = sqrt(sum_gyr_x / sample_size);
+    rms_data[4] = sqrt(sum_gyr_y / sample_size);
+    rms_data[5] = sqrt(sum_gyr_z / sample_size);
+    uart_write_bytes(UART_NUM, (const char*)rms_data, sizeof(float) * 6);
+
+    // Envio de peaks de las 4 variables de medicion
+    obtener5Peaks(vals_acc_x, peaks_acc_x, sample_size);
+    obtener5Peaks(vals_acc_y, peaks_acc_y, sample_size);
+    obtener5Peaks(vals_acc_z, peaks_acc_z, sample_size);
+
+    obtener5Peaks(vals_gyr_x, peaks_gyr_x, sample_size);
+    obtener5Peaks(vals_gyr_y, peaks_gyr_y, sample_size);
+    obtener5Peaks(vals_gyr_z, peaks_gyr_z, sample_size);
+
+    uart_write_bytes(UART_NUM, (const char*)peaks_acc_x, sizeof(float) * 5);
+    uart_write_bytes(UART_NUM, (const char*)peaks_acc_y, sizeof(float) * 5);
+    uart_write_bytes(UART_NUM, (const char*)peaks_acc_z, sizeof(float) * 5);
+    
+    uart_write_bytes(UART_NUM, (const char*)peaks_gyr_x, sizeof(float) * 5);
+    uart_write_bytes(UART_NUM, (const char*)peaks_gyr_y, sizeof(float) * 5);
+    uart_write_bytes(UART_NUM, (const char*)peaks_gyr_z, sizeof(float) * 5);
+
+    // envio de las transformadas de fourier
+    float* resultado_fft_real = malloc(sizeof(float) * sample_size);
+    float* resultado_fft_imag = malloc(sizeof(float) * sample_size);
+
+    calcularFFT(vals_acc_x, sample_size, resultado_fft_real, resultado_fft_imag);
+    uart_write_bytes(UART_NUM, (const char*)resultado_fft_real, sizeof(float) * sample_size);
+    uart_write_bytes(UART_NUM, (const char*)resultado_fft_imag, sizeof(float) * sample_size);
+
+    calcularFFT(vals_acc_y, sample_size, resultado_fft_real, resultado_fft_imag);
+    uart_write_bytes(UART_NUM, (const char*)resultado_fft_real, sizeof(float) * sample_size);
+    uart_write_bytes(UART_NUM, (const char*)resultado_fft_imag, sizeof(float) * sample_size);
+
+    calcularFFT(vals_acc_z, sample_size, resultado_fft_real, resultado_fft_imag);
+    uart_write_bytes(UART_NUM, (const char*)resultado_fft_real, sizeof(float) * sample_size);
+    uart_write_bytes(UART_NUM, (const char*)resultado_fft_imag, sizeof(float) * sample_size);
+
+    calcularFFT(vals_gyr_x, sample_size, resultado_fft_real, resultado_fft_imag);
+    uart_write_bytes(UART_NUM, (const char*)resultado_fft_real, sizeof(float) * sample_size);
+    uart_write_bytes(UART_NUM, (const char*)resultado_fft_imag, sizeof(float) * sample_size);
+
+    calcularFFT(vals_gyr_y, sample_size, resultado_fft_real, resultado_fft_imag);
+    uart_write_bytes(UART_NUM, (const char*)resultado_fft_real, sizeof(float) * sample_size);
+    uart_write_bytes(UART_NUM, (const char*)resultado_fft_imag, sizeof(float) * sample_size);
+
+    calcularFFT(vals_gyr_z, sample_size, resultado_fft_real, resultado_fft_imag);
+    uart_write_bytes(UART_NUM, (const char*)resultado_fft_real, sizeof(float) * sample_size);
+    uart_write_bytes(UART_NUM, (const char*)resultado_fft_imag, sizeof(float) * sample_size);
+
+    free(vals_acc_x);
+    free(vals_acc_y);
+    free(vals_acc_z);
+    free(vals_gyr_x);
+    free(vals_gyr_y);
+    free(vals_gyr_z);
+
+    free(resultado_fft_real);
+    free(resultado_fft_imag);
+}
+
+
+void init_nvs() {
+    // Inicializar NVS
+    esp_err_t err = nvs_flash_init();
+
+    // Si el NVS necesita ser reformateado
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        printf("%s: NVS necesita ser reformateado", esp_err_to_name(err));
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+
+    ESP_ERROR_CHECK(err);
+}
+
+// Función para leer el tamaño de la ventana desde NVS
+int load_window_size(int default_size) {
+    nvs_handle_t my_handle;
+    int32_t size = default_size;
+
+    // Abre el espacio de nombres en NVS
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &my_handle);
+
+    if (err != ESP_OK) {
+        printf("%s: Error al abrir NVS\n", esp_err_to_name(err));
+        return default_size;
+    }
+
+    // Lee el tamaño de la ventana
+    err = nvs_get_i32(my_handle, "window_size", &size);
+
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        printf("%s: No se encontró el tamano de la de la muestra en el NVS\n", esp_err_to_name(err));
+    } else if (err != ESP_OK) {
+        printf("%s: Error al leer el tamano de la muestra\n", esp_err_to_name(err));
+    }
+
+    // Cierra el espacio de nombres en NVS
+    nvs_close(my_handle);
+    return size;
+}
+
+
+// Función para guardar el tamaño de la ventana en NVS
+int save_window_size(int size) {
+    nvs_handle_t my_handle;
+    esp_err_t err;
+    int ret = 0;
+
+    // Abre el espacio de nombres en NVS
+    err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) {
+        printf("%s: Error al abrir NVS\n", esp_err_to_name(err));
+        return ret;
+    }
+
+    // Guarda el tamaño de la ventana
+    err = nvs_set_i32(my_handle, "window_size", size);
+    if (err != ESP_OK) {
+        printf("%s: Error al guardar el tamano de la ventana\n", esp_err_to_name(err));
+    } else {
+        // Confirma el cambio
+        err = nvs_commit(my_handle);
+        if (err != ESP_OK) {
+            printf("%s: Error al confirmar el tamano de la ventana\n", esp_err_to_name(err));
+        } else {
+            printf("%s: Tamano de ventana guardado\n", esp_err_to_name(err));
+            ret = 1;
         }
     }
+
+    // Cierra el espacio de nombres en NVS
+    nvs_close(my_handle);
+    return ret;
 }
 
-
-void bmipowermode(void) {
-    // PWR_CTRL: disable auxiliary sensor, gryo and temp; acc on
-    // 400Hz en datos acc, filter: performance optimized, acc_range +/-8g (1g = 9.80665 m/s2, alcance max: 78.4532 m/s2, 16 bit= 65536 => 1bit = 78.4532/32768 m/s2)
-    uint8_t reg_pwr_ctrl = 0x7D, val_pwr_ctrl = 0x04;
-    uint8_t reg_acc_conf = 0x40, val_acc_conf;
-    uint8_t reg_pwr_conf = 0x7C, val_pwr_conf = 0x00;
-
-    // 0xA8 100hz, 0xA9 para 200Hz, 0xAA 400hz, 0xAB 800hz, 0xAC 1600hz
-    if (Fodr == 200)
-        val_acc_conf = 0xA9;
-    else if (Fodr == 400)
-        val_acc_conf = 0xAA;
-    else if (Fodr == 800)
-        val_acc_conf = 0xAB;
-    else if (Fodr == 1600)
-        val_acc_conf = 0xAC;
-    else {
-        printf("FRECUENCIA DE MUESTREO BMI270 INCORRECTO.\n");
-        exit(EXIT_SUCCESS);
-    };
-
-    bmi_write(&reg_pwr_ctrl, &val_pwr_ctrl, 1);
-    bmi_write(&reg_acc_conf, &val_acc_conf, 1);
-    bmi_write(&reg_pwr_conf, &val_pwr_conf, 1);
-
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-}
 
 #define GET_DATA 'g'
 #define CHANGE_SAMPLE_SIZE 'c'
@@ -806,6 +1129,39 @@ void app_main(void) {
     check_initialization();
     bmipowermode();
     internal_status();
-    printf("Comienza lectura\n\n");
-    lectura();
+    
+    uart_setup();
+    handshake();
+
+    init_nvs();
+    
+    uint32_t sample_size = load_window_size(50);
+
+    while (1) {
+        char command;
+
+        while (serial_read(&command, 1) == 0)
+            continue;
+
+        if (command == GET_DATA) {
+            //printf("Comienza lectura\n\n");
+            lectura(sample_size);
+
+        } else if (command == CHANGE_SAMPLE_SIZE) {
+            uint32_t new_sample_size;
+            serial_read((char*)&new_sample_size, sizeof(new_sample_size));
+
+            if (save_window_size(new_sample_size))
+                sample_size = new_sample_size;
+
+        } else if (command == GET_SAMPLE_SIZE) {
+            uart_write_bytes(UART_NUM, (char*)&sample_size, sizeof(uint32_t));
+
+        } else if (command == QUIT) {
+            esp_restart();
+
+        } else {
+            printf("FAIL");
+        }
+    }
 }
